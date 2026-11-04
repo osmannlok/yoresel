@@ -11,16 +11,24 @@
  *   $items               order_items satırları
  *   $address             teslimat adresi anlık kopyası (JSON'dan çözülmüş)
  *   $history             list: status, note, created_at (personel adı yok)
+ *   $shipments           (isteğe bağlı) list: carrier_name, tracking_number,
+ *                        tracking_url, status, shipped_at, delivered_at.
+ *                        Verilmezse veya boşsa kargo bloğu yalnızca siparişin
+ *                        durumuna göre bilgi mesajı gösterir.
  *   $statusLabels        sipariş durumu => görünen ad
  *   $paymentStatusLabels ödeme durumu => görünen ad
  *   $listPath            /hesabim/siparisler
  *
- * Fiyatlar KDV dahil, TRY. Kargo takip bilgisi (FR-069) shipments modeli
- * yazıldığında eklenecektir.
+ * Kargo bloğu (FR-069): kargo firması, takip numarası ve gönderim durumu
+ * gösterilir. Kargo takibi manuel olduğundan (FR-067) bilgiyi yönetici girer;
+ * parçalı gönderimde her gönderim ayrı kart olarak listelenir. Takip adresi
+ * yalnızca http/https ise bağlantıya çevrilir; diğer değerler düz metin olur.
+ *
+ * Fiyatlar KDV dahil, TRY.
  *
  * Kullanılabilir yardımcılar: $this->e(), $this->url()
  *
- * Gereksinimler: FR-055, FR-063, FR-066, FR-069, G-02, G-05, NFR-005.
+ * Gereksinimler: FR-055, FR-063, FR-066, FR-067, FR-069, G-02, G-05, NFR-005.
  */
 
 declare(strict_types=1);
@@ -29,6 +37,7 @@ $order               = isset($order) && is_array($order) ? $order : [];
 $items               = isset($items) && is_array($items) ? $items : [];
 $address             = isset($address) && is_array($address) ? $address : [];
 $history             = isset($history) && is_array($history) ? $history : [];
+$shipments           = isset($shipments) && is_array($shipments) ? $shipments : [];
 $statusLabels        = isset($statusLabels) && is_array($statusLabels) ? $statusLabels : [];
 $paymentStatusLabels = isset($paymentStatusLabels) && is_array($paymentStatusLabels) ? $paymentStatusLabels : [];
 $listPath            = isset($listPath) ? (string) $listPath : '/hesabim/siparisler';
@@ -46,6 +55,17 @@ $statusColors = [
     'returned'         => 'secondary',
 ];
 
+/** Gönderim durumu => [müşteriye görünen ad, rozet rengi] (shipments.status ENUM) */
+$shipmentStatusMeta = [
+    'preparing'        => ['Hazırlanıyor', 'secondary'],
+    'handed_to_cargo'  => ['Kargoya verildi', 'primary'],
+    'in_transit'       => ['Yolda', 'primary'],
+    'out_for_delivery' => ['Dağıtımda', 'info'],
+    'delivered'        => ['Teslim edildi', 'success'],
+    'failed'           => ['Teslim edilemedi', 'danger'],
+    'returned'         => ['İade edildi', 'secondary'],
+];
+
 /** Tutarı Türkçe biçimde yazar: 1.250,50 ₺ */
 $money = static fn (mixed $amount): string => number_format((float) $amount, 2, ',', '.') . ' ₺';
 
@@ -60,6 +80,15 @@ $dateText = static function (mixed $value): string {
 $addr = static fn (string $key): string => isset($address[$key]) && is_scalar($address[$key])
     ? trim((string) $address[$key])
     : '';
+
+/** Takip adresi yalnızca geçerli http/https ise bağlantı olur (javascript: vb. reddedilir). */
+$isSafeUrl = static function (string $url): bool {
+    if ($url === '' || filter_var($url, FILTER_VALIDATE_URL) === false) {
+        return false;
+    }
+
+    return in_array(strtolower((string) parse_url($url, PHP_URL_SCHEME)), ['http', 'https'], true);
+};
 
 $status        = (string) ($order['status'] ?? '');
 $paymentStatus = (string) ($order['payment_status'] ?? '');
@@ -83,6 +112,9 @@ if ($addr('city') !== '') {
 $shippingTotal = (float) ($order['shipping_total'] ?? 0);
 $discountTotal = (float) ($order['discount_total'] ?? 0);
 $customerNote  = trim((string) ($order['customer_note'] ?? ''));
+
+// Kargo bloğu: gönderim kaydı varsa veya sipariş kargo aşamasındaysa gösterilir
+$showShipping = $shipments !== [] || in_array($status, ['preparing', 'shipped', 'delivered'], true);
 ?>
 <div class="container py-4 py-lg-5">
 
@@ -161,6 +193,70 @@ $customerNote  = trim((string) ($order['customer_note'] ?? ''));
                     </dl>
                 </div>
             </div>
+
+            <!-- Kargo bilgisi (FR-069) -->
+            <?php if ($showShipping): ?>
+                <div class="card border-0 shadow-sm mb-4" id="kargo">
+                    <div class="card-body p-4">
+                        <h2 class="h5 fw-semibold mb-3">Kargo Bilgisi</h2>
+
+                        <?php if ($shipments === []): ?>
+                            <p class="small text-muted mb-0">
+                                <?= $status === 'preparing'
+                                    ? 'Siparişiniz hazırlanıyor. Kargoya verildiğinde takip bilgisi burada görünecek.'
+                                    : 'Kargo takip bilgisi yakında eklenecek.' ?>
+                            </p>
+                        <?php else: ?>
+                            <?php foreach ($shipments as $index => $shipment): ?>
+                                <?php
+                                $shipStatus   = (string) ($shipment['status'] ?? '');
+                                $shipMeta     = $shipmentStatusMeta[$shipStatus] ?? [$shipStatus, 'secondary'];
+                                $carrier      = trim((string) ($shipment['carrier_name'] ?? ''));
+                                $tracking     = trim((string) ($shipment['tracking_number'] ?? ''));
+                                $trackingUrl  = trim((string) ($shipment['tracking_url'] ?? ''));
+                                $shippedAt    = trim((string) ($shipment['shipped_at'] ?? ''));
+                                $deliveredAt  = trim((string) ($shipment['delivered_at'] ?? ''));
+                                ?>
+                                <div class="<?= $index > 0 ? 'border-top pt-3 mt-3' : '' ?>">
+                                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                                        <span class="fw-semibold">
+                                            <?= count($shipments) > 1 ? 'Gönderim ' . $this->e((string) ($index + 1)) : 'Gönderim' ?>
+                                        </span>
+                                        <span class="badge text-bg-<?= $this->e($shipMeta[1]) ?>"><?= $this->e($shipMeta[0]) ?></span>
+                                    </div>
+
+                                    <dl class="row small mb-0">
+                                        <dt class="col-5 col-sm-4 fw-normal text-muted">Kargo firması</dt>
+                                        <dd class="col-7 col-sm-8 mb-1"><?= $carrier !== '' ? $this->e($carrier) : '<span class="text-muted">—</span>' ?></dd>
+
+                                        <dt class="col-5 col-sm-4 fw-normal text-muted">Takip numarası</dt>
+                                        <dd class="col-7 col-sm-8 mb-1">
+                                            <?php if ($tracking === ''): ?>
+                                                <span class="text-muted">Henüz girilmedi</span>
+                                            <?php elseif ($isSafeUrl($trackingUrl)): ?>
+                                                <a href="<?= $this->e($trackingUrl) ?>" target="_blank"
+                                                   rel="noopener noreferrer"><?= $this->e($tracking) ?></a>
+                                            <?php else: ?>
+                                                <span class="fw-semibold"><?= $this->e($tracking) ?></span>
+                                            <?php endif; ?>
+                                        </dd>
+
+                                        <?php if ($shippedAt !== ''): ?>
+                                            <dt class="col-5 col-sm-4 fw-normal text-muted">Kargo tarihi</dt>
+                                            <dd class="col-7 col-sm-8 mb-1"><?= $this->e($dateText($shippedAt)) ?></dd>
+                                        <?php endif; ?>
+
+                                        <?php if ($deliveredAt !== ''): ?>
+                                            <dt class="col-5 col-sm-4 fw-normal text-muted">Teslim tarihi</dt>
+                                            <dd class="col-7 col-sm-8 mb-1"><?= $this->e($dateText($deliveredAt)) ?></dd>
+                                        <?php endif; ?>
+                                    </dl>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <!-- Durum geçmişi -->
             <div class="card border-0 shadow-sm">

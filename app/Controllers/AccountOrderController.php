@@ -4,7 +4,7 @@
  * Aşıroğlu Yöresel Market - Hesabım: sipariş listesi ve detayı
  *
  * GET /hesabim/siparisler        -> üyenin siparişleri (sayfalı)
- * GET /hesabim/siparisler/{id}   -> sipariş detayı (kalemler, adres, durum geçmişi)
+ * GET /hesabim/siparisler/{id}   -> sipariş detayı (kalemler, adres, kargo, durum geçmişi)
  *
  * Kararlar (DECISIONS.md, Order modeli / Müşteri Auth):
  * - Yalnızca giriş yapmış üyeye açıktır. Misafir /giris sayfasına, dönüş
@@ -12,8 +12,12 @@
  *   kurallarına uyan sabit bir yoldur.
  * - Sipariş her zaman Order::findForUser() ile okunur (user_id eşleşmeli);
  *   başka kullanıcının sipariş ID'si "bulunamadı" ile aynı sonucu verir (G-05).
+ *   Gönderimler yalnızca bu doğrulamadan sonra okunur.
  * - Durum geçmişinden müşteriye yalnızca durum, not ve tarih verilir;
  *   değişikliği yapan personelin adı view'a taşınmaz.
+ * - Kargo bilgisi (FR-069): müşteriye yalnızca firma, takip numarası, takip
+ *   bağlantısı, durum ve tarihler verilir. Takip bağlantısı yalnızca http/https
+ *   ise geçirilir. Gönderim okunamazsa sipariş sayfası yine açılır (loglanır).
  * - Ödeme yöntemi orders tablosunda saklanmaz (payments modeli gelene kadar);
  *   bu sayfa yalnızca payment_status gösterir.
  * - Yalnızca GET; CSRF gerektiren işlem yoktur. Çıktı kaçırma view'lardadır.
@@ -31,6 +35,8 @@ use App\Core\Request;
 use App\Core\Response;
 use App\Core\Session;
 use App\Models\Order;
+use App\Models\Shipment;
+use Throwable;
 
 final class AccountOrderController extends Controller
 {
@@ -66,6 +72,17 @@ final class AccountOrderController extends Controller
         'failed'             => 'Başarısız',
         'refunded'           => 'İade Edildi',
         'partially_refunded' => 'Kısmen İade Edildi',
+    ];
+
+    /** Gönderim durumu => görünen ad (shipments.status ENUM, migration 014) */
+    public const SHIPMENT_STATUS_LABELS = [
+        'preparing'        => 'Hazırlanıyor',
+        'handed_to_cargo'  => 'Kargoya Verildi',
+        'in_transit'       => 'Yolda',
+        'out_for_delivery' => 'Dağıtımda',
+        'delivered'        => 'Teslim Edildi',
+        'failed'           => 'Teslim Edilemedi',
+        'returned'         => 'İade Döndü',
     ];
 
     // -------------------------------------------------------------------------
@@ -132,14 +149,16 @@ final class AccountOrderController extends Controller
         $orderId = (int) $order['id'];
 
         return $this->view('account/orders/show', [
-            'title'               => 'Sipariş ' . (string) $order['order_number'],
-            'order'               => $order,
-            'items'               => $orders->getItems($orderId),
-            'address'             => $this->decodeSnapshot((string) $order['shipping_address_snapshot']),
-            'history'             => $this->customerHistory($orders->getHistory($orderId)),
-            'statusLabels'        => self::STATUS_LABELS,
-            'paymentStatusLabels' => self::PAYMENT_STATUS_LABELS,
-            'listPath'            => self::LIST_PATH,
+            'title'                => 'Sipariş ' . (string) $order['order_number'],
+            'order'                => $order,
+            'items'                => $orders->getItems($orderId),
+            'address'              => $this->decodeSnapshot((string) $order['shipping_address_snapshot']),
+            'history'              => $this->customerHistory($orders->getHistory($orderId)),
+            'shipments'            => $this->customerShipments($orderId),
+            'statusLabels'         => self::STATUS_LABELS,
+            'paymentStatusLabels'  => self::PAYMENT_STATUS_LABELS,
+            'shipmentStatusLabels' => self::SHIPMENT_STATUS_LABELS,
+            'listPath'             => self::LIST_PATH,
         ]);
     }
 
@@ -156,6 +175,55 @@ final class AccountOrderController extends Controller
         Session::flash('info', 'Siparişlerinizi görmek için giriş yapın.');
 
         return $this->redirect(self::LOGIN_PATH . '?' . http_build_query(['next' => $next]));
+    }
+
+    /**
+     * Siparişin gönderimlerini müşteriye gösterilecek alanlarla sınırlar (FR-069).
+     * Sipariş sahipliği çağıran tarafından doğrulanmış olmalıdır.
+     * Okuma hatası sayfayı bozmaz; loglanır ve boş liste döner.
+     *
+     * @return list<array{
+     *     carrier_name: string, tracking_number: string, tracking_url: string,
+     *     status: string, shipped_at: string, delivered_at: string
+     * }>
+     */
+    private function customerShipments(int $orderId): array
+    {
+        try {
+            // Varsayım: Shipment::getByOrder(int): list<array>. Ad farklıysa yalnızca bu satır değişir.
+            $rows = (new Shipment())->getByOrder($orderId);
+        } catch (Throwable $e) {
+            error_log(sprintf(
+                '[%s] AccountOrderController: gönderimler okunamadı (sipariş %d): %s',
+                date('Y-m-d H:i:s'),
+                $orderId,
+                $e->getMessage()
+            ));
+
+            return [];
+        }
+
+        $result = [];
+
+        foreach ($rows as $row) {
+            $url = trim((string) ($row['tracking_url'] ?? ''));
+
+            // Yalnızca http/https bağlantı geçer (javascript: vb. düşer)
+            if ($url !== '' && preg_match('#^https?://#i', $url) !== 1) {
+                $url = '';
+            }
+
+            $result[] = [
+                'carrier_name'    => trim((string) ($row['carrier_name'] ?? '')),
+                'tracking_number' => trim((string) ($row['tracking_number'] ?? '')),
+                'tracking_url'    => $url,
+                'status'          => (string) ($row['status'] ?? ''),
+                'shipped_at'      => (string) ($row['shipped_at'] ?? ''),
+                'delivered_at'    => (string) ($row['delivered_at'] ?? ''),
+            ];
+        }
+
+        return $result;
     }
 
     /**

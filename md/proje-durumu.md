@@ -45,6 +45,10 @@
 - [x] `App.php`: `GET /hesabim/siparisler`, `GET /hesabim/siparisler/{id:\d+}` (AdminMiddleware dışı)
 - [x] `layouts/main.php`: üye menüsünde "Siparişlerim" bağlantısı (aktif işaretli)
 
+- [x] `app/Services/Payment/PaytrGateway.php' yazıldı.
+- [x] `app/Services/Payment/PaymentGatewayInterface.php' yazıldı.
+- [x] `app/Models/Coupon.php' yazıldı.
+- [x] `app/Models/Shipment.php' yazıldı.
 
 ## 3. Migration’lar (001–018)
 
@@ -82,16 +86,16 @@
 | CheckoutService | quote/validate/placeOrder; güncel fiyatla kargo hesabı; başarıdan sonra sepet boşalır |
 | Coupon | kupon doğrulama/kullanım; `used_count` transaction’da |
 | Payment | ödeme kaydı ve ödeme durumu işlemleri |
+|Shipment | delete/create/update kapalı; createForOrder, markHandedToCargo, updateTracking, changeStatus (FOR UPDATE); getForCustomer (FR-069) satırı.
 
 **Uploader:** products|categories|brands|banners · finfo + getimagesize · rastgele ad
 
 ## 5. Sıradaki
 
-1. `PaymentGatewayInterface.php` (sonraki dosya)
-2. Kart/havale ödeme akışı ve checkout/sipariş entegrasyonu
-3. Admin sipariş yönetimi, kargo takip no (shipments); tamamlanınca `account/orders/show.php`'ye kargo bloğu (FR-069)
-4. Hesabım profil/adres sayfaları (FR-053, FR-054)
-5. İade → E-posta → Raporlama
+
+
+3. Hesabım profil/adres sayfaları (FR-053, FR-054)
+4. İade → E-posta → Raporlama
 
 ## 6. Kritik Kararlar (özet)
 
