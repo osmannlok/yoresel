@@ -190,8 +190,8 @@ final class AccountOrderController extends Controller
     private function customerShipments(int $orderId): array
     {
         try {
-            // Varsayım: Shipment::getByOrder(int): list<array>. Ad farklıysa yalnızca bu satır değişir.
-            $rows = (new Shipment())->getByOrder($orderId);
+            // Yalnızca müşteriye gösterilebilir sütunları okur (iç alanlar SELECT'e girmez)
+            $rows = (new Shipment())->getForCustomer($orderId);
         } catch (Throwable $e) {
             error_log(sprintf(
                 '[%s] AccountOrderController: gönderimler okunamadı (sipariş %d): %s',
