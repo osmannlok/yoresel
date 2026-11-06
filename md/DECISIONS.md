@@ -81,6 +81,15 @@
 - Kupon henüz yok → discount_total=0, coupon_id=NULL
 - Misafir takip: numara + e-posta; üye: `findForUser()` yalnızca sahip
 
+### Sipariş durumları ve FR-066 farkı (KALICI KARAR)
+
+- FR-066 listesi: Beklemede, Ödeme Bekliyor, Ödendi, Hazırlanıyor, Kargoya Verildi, Teslim Edildi, İptal Edildi, İade Sürecinde, İade Edildi
+- Kod, FR-066'dan iki noktada ayrılır:
+  - `payment_failed` ("Ödeme Başarısız"), FR-066 listesine EK durumdur ve kalır. Sebep: ödeme başarısız olursa sipariş silinmez, stok tutulur, yeniden ödeme denenebilir
+  - `return_requested` ("İade Sürecinde") şu aşamada EKLENMEZ. İade modülü (`return_requests`, Geliştirme Sırası 11) yazılırken eklenecek
+- İade modülü geldiğinde akış: `delivered → return_requested → returned / delivered` (talep reddedilirse sipariş `delivered`'a döner). Eklerken: yeni migration (ENUM değişikliği, çalışmış migration değiştirilmez), `Order::TRANSITIONS`, etiket sabitleri ve rozet renkleri birlikte güncellenir
+- Bu aşamada `delivered → returned` doğrudan geçişi geçerlidir; iade modülü ile `return_requested` üzerinden akacak şekilde değişecektir
+
 ## Kupon
 
 - Soft delete: `deleted_at` · sorguda `IS NULL` zorunlu · fiziksel silme yok
