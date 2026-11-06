@@ -27,7 +27,7 @@
  *
  * Tüm sorgular PDO prepared statement ile çalışır; $_GET / $_POST kullanılmaz.
  *
- * Gereksinimler: FR-060, FR-062, FR-063, FR-064, FR-066, FR-076, NFR-001.
+ * Gereksinimler: FR-060, FR-062, FR-063, FR-064, FR-066, FR-076, FR-091, FR-092, NFR-001.
  */
 
 declare(strict_types=1);
@@ -36,6 +36,7 @@ namespace App\Models;
 
 use App\Core\Model;
 use BadMethodCallException;
+use DateTimeImmutable;
 use InvalidArgumentException;
 
 final class Order extends Model
@@ -51,6 +52,12 @@ final class Order extends Model
 
     /** Sipariş oluşturulurken verilebilen başlangıç durumları */
     private const INITIAL_STATUSES = ['pending', 'awaiting_payment'];
+
+    /** Admin listesinde filtrelenebilen ödeme durumları (orders.payment_status ENUM) */
+    private const PAYMENT_STATUSES = ['unpaid', 'paid', 'failed', 'refunded', 'partially_refunded'];
+
+    /** Admin sipariş notunun en fazla uzunluğu (orders.admin_note VARCHAR(1000)) */
+    private const MAX_ADMIN_NOTE_LENGTH = 1000;
 
     /**
      * İzin verilen durum geçişleri: mevcut durum => geçilebilecek durumlar.
@@ -439,6 +446,174 @@ final class Order extends Model
             'perPage'    => $perPage,
             'totalPages' => $totalPages,
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Yönetim paneli (FR-091, FR-092)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Yönetim paneli sipariş listesi (en yeni önce), filtreli ve sayfalı.
+     *
+     * $filters anahtarları (hepsi isteğe bağlı; geçersiz değer sessizce yok sayılır):
+     *   status          sipariş durumu (TRANSITIONS anahtarlarından biri)
+     *   payment_status  ödeme durumu
+     *   q               sipariş numarası, e-posta veya telefonda arama (en fazla 100 karakter)
+     *   date_from       YYYY-AA-GG (bu gün dahil)
+     *   date_to         YYYY-AA-GG (bu gün dahil)
+     *
+     * @param array<string, mixed> $filters
+     *
+     * @return array{
+     *     items: list<array<string, mixed>>,
+     *     total: int,
+     *     page: int,
+     *     perPage: int,
+     *     totalPages: int
+     * }
+     */
+    public function paginateForAdmin(array $filters = [], int $page = 1, int $perPage = 20): array
+    {
+        $perPage = min(self::MAX_PER_PAGE, max(1, $perPage));
+
+        $where  = ['deleted_at IS NULL'];
+        $params = [];
+
+        $status = (string) ($filters['status'] ?? '');
+
+        if ($status !== '' && array_key_exists($status, self::TRANSITIONS)) {
+            $where[]  = 'status = ?';
+            $params[] = $status;
+        }
+
+        $paymentStatus = (string) ($filters['payment_status'] ?? '');
+
+        if ($paymentStatus !== '' && in_array($paymentStatus, self::PAYMENT_STATUSES, true)) {
+            $where[]  = 'payment_status = ?';
+            $params[] = $paymentStatus;
+        }
+
+        $query = mb_substr(trim((string) ($filters['q'] ?? '')), 0, 100);
+
+        if ($query !== '') {
+            // LIKE joker karakterleri (% _ \) arama metninde düz karakter sayılır
+            $like     = '%' . addcslashes($query, '%_\\') . '%';
+            $where[]  = '(order_number LIKE ? OR customer_email LIKE ? OR customer_phone LIKE ?)';
+            $params[] = $like;
+            $params[] = $like;
+            $params[] = $like;
+        }
+
+        $dateFrom = $this->normalizeDate($filters['date_from'] ?? null);
+
+        if ($dateFrom !== null) {
+            $where[]  = 'created_at >= ?';
+            $params[] = $dateFrom . ' 00:00:00';
+        }
+
+        $dateTo = $this->normalizeDate($filters['date_to'] ?? null);
+
+        if ($dateTo !== null) {
+            // Bitiş günü dahil: ertesi günün başlangıcından küçük
+            $where[]  = 'created_at < ?';
+            $params[] = (new DateTimeImmutable($dateTo))->modify('+1 day')->format('Y-m-d') . ' 00:00:00';
+        }
+
+        $condition = implode(' AND ', $where);
+
+        $total = (int) $this->fetchValue('SELECT COUNT(*) FROM orders WHERE ' . $condition, $params);
+
+        $totalPages = max(1, (int) ceil($total / $perPage));
+        $page       = min(max(1, $page), $totalPages);
+        $offset     = ($page - 1) * $perPage;
+
+        // LIMIT ve OFFSET tamsayıya çevrilmiş değerlerdir, güvenle eklenir
+        $items = $this->fetchAll(
+            'SELECT id, order_number, customer_email, status, payment_status, grand_total, currency, created_at,'
+            . ' (SELECT COALESCE(SUM(quantity), 0) FROM order_items i WHERE i.order_id = orders.id) AS item_count'
+            . ' FROM orders'
+            . ' WHERE ' . $condition
+            . ' ORDER BY created_at DESC, id DESC'
+            . ' LIMIT ' . $perPage . ' OFFSET ' . $offset,
+            $params
+        );
+
+        return [
+            'items'      => $items,
+            'total'      => $total,
+            'page'       => $page,
+            'perPage'    => $perPage,
+            'totalPages' => $totalPages,
+        ];
+    }
+
+    /**
+     * Duruma göre sipariş sayıları (silinmemiş siparişler). Listedeki durum
+     * sekmeleri içindir; hiç siparişi olmayan durum 0 döner.
+     *
+     * @return array<string, int> durum => adet (tüm geçerli durumlar bulunur)
+     */
+    public function countByStatus(): array
+    {
+        $counts = array_fill_keys(array_keys(self::TRANSITIONS), 0);
+
+        $rows = $this->fetchAll(
+            'SELECT status, COUNT(*) AS total FROM orders WHERE deleted_at IS NULL GROUP BY status'
+        );
+
+        foreach ($rows as $row) {
+            $status = (string) $row['status'];
+
+            if (array_key_exists($status, $counts)) {
+                $counts[$status] = (int) $row['total'];
+            }
+        }
+
+        return $counts;
+    }
+
+    /**
+     * Yönetici notunu yazar (orders.admin_note). Müşteriye gösterilmez; bu yüzden
+     * durum geçmişine değil, ayrı alana yazılır. Boş metin notu temizler.
+     *
+     * @return bool Sipariş bulunduysa true; bulunamazsa false
+     *
+     * @throws InvalidArgumentException Not çok uzunsa
+     */
+    public function saveAdminNote(int $orderId, ?string $note): bool
+    {
+        $clean = $note === null ? '' : trim($note);
+
+        if (mb_strlen($clean) > self::MAX_ADMIN_NOTE_LENGTH) {
+            throw new InvalidArgumentException(
+                'Sipariş notu en fazla ' . self::MAX_ADMIN_NOTE_LENGTH . ' karakter olabilir.'
+            );
+        }
+
+        $this->execute(
+            'UPDATE orders SET admin_note = ? WHERE id = ? AND deleted_at IS NULL',
+            [$clean === '' ? null : $clean, $orderId]
+        );
+
+        // MySQL değer değişmediyse 0 satır bildirir; varlık ayrıca doğrulanır
+        return $this->fetchValue(
+            'SELECT 1 FROM orders WHERE id = ? AND deleted_at IS NULL',
+            [$orderId]
+        ) !== null;
+    }
+
+    /** "YYYY-AA-GG" geçerliyse aynısını, değilse null döndürür. */
+    private function normalizeDate(mixed $value): ?string
+    {
+        $text = trim((string) $value);
+
+        if ($text === '') {
+            return null;
+        }
+
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $text);
+
+        return $date !== false && $date->format('Y-m-d') === $text ? $text : null;
     }
 
     // -------------------------------------------------------------------------
