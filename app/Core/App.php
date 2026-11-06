@@ -16,9 +16,11 @@ use App\Controllers\Admin\AuthController as AdminAuthController;
 use App\Controllers\Admin\BrandController;
 use App\Controllers\Admin\CategoryController;
 use App\Controllers\Admin\DashboardController;
+use App\Controllers\Admin\OrderController;
 use App\Controllers\Admin\ProductController;
 use App\Controllers\Admin\ProductImageController;
 use App\Controllers\Admin\ProductVariantController;
+use App\Controllers\Admin\ShipmentController;
 use App\Controllers\Admin\ShippingMethodController;
 use App\Controllers\Admin\StockController;
 use App\Controllers\AuthController as StorefrontAuthController;
@@ -208,6 +210,18 @@ final class App
                 $router->get('/kargo/{id:\d+}/duzenle', [ShippingMethodController::class, 'edit']);
                 $router->post('/kargo/{id:\d+}/guncelle', [ShippingMethodController::class, 'update']);
                 $router->post('/kargo/{id:\d+}/durum', [ShippingMethodController::class, 'toggle']);
+
+                // Siparişler (FR-066, FR-091, FR-092)
+                $router->get('/siparisler', [OrderController::class, 'index']);
+                $router->get('/siparisler/{id:\d+}', [OrderController::class, 'show']);
+                $router->post('/siparisler/{id:\d+}/durum', [OrderController::class, 'changeStatus']);
+                $router->post('/siparisler/{id:\d+}/not', [OrderController::class, 'saveNote']);
+
+                // Sipariş gönderimleri / manuel kargo takibi (FR-067, FR-069)
+                $router->post('/siparisler/{orderId:\d+}/gonderimler', [ShipmentController::class, 'store']);
+                $router->post('/siparisler/{orderId:\d+}/gonderimler/{id:\d+}/kargoya-ver', [ShipmentController::class, 'markHandedToCargo']);
+                $router->post('/siparisler/{orderId:\d+}/gonderimler/{id:\d+}/takip', [ShipmentController::class, 'updateTracking']);
+                $router->post('/siparisler/{orderId:\d+}/gonderimler/{id:\d+}/durum', [ShipmentController::class, 'changeStatus']);
 
 
             }
